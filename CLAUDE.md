@@ -11,7 +11,7 @@ The purpose of this Python app is to conduct analysis of various sports books an
 - For all sportsbooks and prediction markets, we should store both the actual raw odds (in decimal notation) alongside a de-vigged version of the odds that uses a constant exponent on all raw outcomes odds to normalize to a summed probability (across outcomes) of 1. Make sure to use the constant exponent method, not the additive, multiplicative, or Shin de-vigging methods.
 - We'll restrict this analysis to sports markets only (e.g. not political bets), as the outcomes are easily definable.
 - We'll only look at odds for single-match outcomes, no parlays or prop bets or season standings/tables bets.
-- We'll only analyze odds up to the start of each event (not live or in-game odds). 
+- Store an is_closing_line Boolean variable for odds_snapshots, which should be set to False unless both of these conditions are met: 1) it is the last odds snapshot for a given platform and outcome combination for this market prior to the game starting, and 2) the odds snapshot was collected no earlier than 30 minutes prior to game start time.
 - For markets where each outcome can have both Yes and No bets, we'll only analyze the Yes part for each outcome (as the No bets would be somewhat duplicative).
 - Let's start with Major League Baseball moneyline odds (which have binary outcomes: home win / away win), as this league is currently in season and has many games each day to start building a dataset from.
 - However, note that the logic (and therefore the accompanying database schema) should be generalizable to markets with ternary outcomes (e.g. in soccer, where it's typically home win / away win / draw). Plan to add Premier League ternary-outcome matches when that season starts.

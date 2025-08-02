@@ -150,8 +150,8 @@ class OddsAnalysisOrchestrator:
                     game_data = {
                         'sport': 'mlb',
                         'league': 'Major League Baseball',
-                        'home_team': game_info['teams'][0],  # First team as home (arbitrary for now)
-                        'away_team': game_info['teams'][1],  # Second team as away
+                        'home_team': game_info.get('home_team', game_info['teams'][0]),  # Use explicit home team if available
+                        'away_team': game_info.get('away_team', game_info['teams'][1]),  # Use explicit away team if available
                         'game_start_time': reference_time
                     }
                     
@@ -183,7 +183,7 @@ class OddsAnalysisOrchestrator:
                                 print(f"Error parsing clobTokenIds: {e}")
                                 continue
                             
-                            # Process all CLOB token IDs (both "Yes" and implied "No" outcomes)
+                            # Process all CLOB token IDs (each represents a "Yes" outcome for different teams)
                             for i, token_id in enumerate(clob_token_ids):
                                 # Get prices from CLOB API
                                 price_data = self.polymarket.get_market_prices(token_id)
@@ -228,8 +228,12 @@ class OddsAnalysisOrchestrator:
         if len(team_names) != 2:
             return None
         
-        # Normalize team names
-        normalized_teams = [Game.normalize_team_name(team) for team in team_names]
+        # Find teams in database
+        from src.models.team import Team
+        team_objects = [Team.find_team_by_name(team, 'mlb') for team in team_names]
+        if not all(team_objects):
+            return None
+        normalized_teams = [team.canonical_name for team in team_objects]
         
         if reference_time:
             # When we have a reference time (e.g., from Polymarket gameStartTime), 
@@ -241,8 +245,8 @@ class OddsAnalysisOrchestrator:
                 WHERE sport = 'mlb'
                 AND game_start_time BETWEEN %s - INTERVAL '48 hours' AND %s + INTERVAL '24 hours'
                 AND (
-                    (home_team_normalized = %s AND away_team_normalized = %s) OR
-                    (home_team_normalized = %s AND away_team_normalized = %s)
+                    (home_team_id = %s AND away_team_id = %s) OR
+                    (home_team_id = %s AND away_team_id = %s)
                 )
                 ORDER BY ABS(EXTRACT(EPOCH FROM (game_start_time - %s))) ASC
                 LIMIT 1
@@ -250,8 +254,8 @@ class OddsAnalysisOrchestrator:
             
             result = db_manager.execute_query(query, (
                 reference_time, reference_time, reference_time,
-                normalized_teams[0], normalized_teams[1],
-                normalized_teams[1], normalized_teams[0],
+                team_objects[0].id, team_objects[1].id,
+                team_objects[1].id, team_objects[0].id,
                 reference_time
             ))
         else:
@@ -263,8 +267,8 @@ class OddsAnalysisOrchestrator:
                 WHERE sport = 'mlb'
                 AND game_start_time > NOW() - INTERVAL '24 hours'
                 AND (
-                    (home_team_normalized = %s AND away_team_normalized = %s) OR
-                    (home_team_normalized = %s AND away_team_normalized = %s)
+                    (home_team_id = %s AND away_team_id = %s) OR
+                    (home_team_id = %s AND away_team_id = %s)
                 )
                 ORDER BY 
                     CASE 
@@ -276,8 +280,8 @@ class OddsAnalysisOrchestrator:
             """
             
             result = db_manager.execute_query(query, (
-                normalized_teams[0], normalized_teams[1],
-                normalized_teams[1], normalized_teams[0]
+                team_objects[0].id, team_objects[1].id,
+                team_objects[1].id, team_objects[0].id
             ))
         
         if result:
@@ -294,8 +298,8 @@ class OddsAnalysisOrchestrator:
             game_data = result[0][:-1]  # Exclude last column (time_diff_seconds)
             game = Game(**dict(zip([
                 'id', 'sport', 'league', 'home_team', 'away_team',
-                'game_date', 'game_start_time', 'home_team_normalized',
-                'away_team_normalized', 'season', 'actual_outcome',
+                'game_date', 'game_start_time', 'home_team_id', 'away_team_id',
+                'home_team_normalized', 'away_team_normalized', 'season', 'actual_outcome',
                 'home_score', 'away_score', 'game_status', 'created_at', 'updated_at'
             ], game_data)))
             

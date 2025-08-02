@@ -5,7 +5,7 @@ import json
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 import time
-from src.utils.teams import find_teams_in_text, get_team_keywords
+from src.models.team import find_teams_in_text
 
 
 class PolymarketCollector:
@@ -133,6 +133,33 @@ class PolymarketCollector:
                     break
         
         if len(found_teams) >= 2:
+            # Determine home/away teams based on Polymarket title format
+            # Polymarket uses "Team A vs. Team B" where Team A is away and Team B is home
+            home_team = None
+            away_team = None
+            
+            # Check if title follows "Team A vs. Team B" format
+            if ' vs. ' in title:
+                # Split by " vs. " and try to match teams
+                parts = title.split(' vs. ')
+                if len(parts) == 2:
+                    # Extract team names from each part
+                    away_candidates = find_teams_in_text(parts[0])
+                    home_candidates = find_teams_in_text(parts[1])
+                    
+                    # Find the teams that were already identified
+                    for team in found_teams:
+                        if team in away_candidates:
+                            away_team = team
+                        elif team in home_candidates:
+                            home_team = team
+            
+            # Fallback: if we couldn't determine from title format, use first two found teams
+            if not home_team or not away_team:
+                print(f"Warning: Could not determine home/away from title format '{title}', using order from found teams")
+                away_team = found_teams[0]  # First found team as away
+                home_team = found_teams[1]  # Second found team as home
+            
             # Extract game start time from markets' gameStartTime field as specified
             game_start_time = None
             markets = event_data.get('markets', [])
@@ -159,7 +186,9 @@ class PolymarketCollector:
                 return None
             
             return {
-                'teams': found_teams[:2],
+                'teams': [home_team, away_team],  # Return as [home, away] for consistency
+                'home_team': home_team,
+                'away_team': away_team,
                 'game_start_time': game_start_time,
                 'event_title': title
             }
@@ -231,9 +260,7 @@ class PolymarketCollector:
             price = float(price_data['last'])
         
         if price and 0 < price <= 1:
-            # For binary markets, token_index 0 is "Yes", token_index 1 is "No"
-            is_yes_outcome = token_index == 0
-            
+            # Each token represents a "Yes" outcome for a specific team
             # Get the actual outcome name from the outcomes field
             outcome_name_from_market = None
             try:
@@ -245,21 +272,11 @@ class PolymarketCollector:
             except (json.JSONDecodeError, IndexError, TypeError):
                 pass
             
-            if is_yes_outcome:
-                # Yes outcome - use the price as-is
-                decimal_odds = 1 / price if price > 0 else 0
-                outcome_type = self._determine_outcome_type_from_market(market_data, teams, token_index)
-                outcome_name = outcome_name_from_market or f"Yes - {market_data.get('question', market_data.get('description', ''))}"
-                probability = price
-            else:
-                # No outcome - calculate implied probability of the opposite
-                no_probability = 1 - price
-                decimal_odds = 1 / no_probability if no_probability > 0 else 0
-                # For No outcome, get the opposite of the Yes outcome (token_index 0)
-                yes_outcome_type = self._determine_outcome_type_from_market(market_data, teams, 0)
-                outcome_type = self._get_opposite_outcome_type(yes_outcome_type)
-                outcome_name = f"No - {outcome_name_from_market or market_data.get('question', market_data.get('description', ''))}"
-                probability = no_probability
+            # All tokens represent "Yes" outcomes for their respective teams
+            decimal_odds = 1 / price if price > 0 else 0
+            outcome_type = self._determine_outcome_type_from_market(market_data, teams, token_index)
+            outcome_name = outcome_name_from_market or f"Yes - {market_data.get('question', market_data.get('description', ''))}"
+            probability = price
             
             normalized_odds.append({
                 'platform_name': 'Polymarket',
@@ -293,13 +310,20 @@ class PolymarketCollector:
             
             # Match outcome name to teams to determine home/away
             if len(teams) == 2:
-                # Check if outcome name matches home team (teams[0]) or away team (teams[1])
+                # teams array is [home_team, away_team] based on our updated extraction logic
                 home_team, away_team = teams[0], teams[1]
                 
                 # Simple string matching - check if team name is in outcome
-                if any(keyword.lower() in outcome_name.lower() for keyword in get_team_keywords(home_team)):
+                from src.models.team import Team
+                home_team_obj = Team.find_team_by_name(home_team, 'mlb')
+                away_team_obj = Team.find_team_by_name(away_team, 'mlb')
+                
+                home_keywords = home_team_obj.keywords if home_team_obj else [home_team.lower()]
+                away_keywords = away_team_obj.keywords if away_team_obj else [away_team.lower()]
+                
+                if any(keyword.lower() in outcome_name.lower() for keyword in home_keywords):
                     return 'home_win'
-                elif any(keyword.lower() in outcome_name.lower() for keyword in get_team_keywords(away_team)):
+                elif any(keyword.lower() in outcome_name.lower() for keyword in away_keywords):
                     return 'away_win'
             
             return 'unknown'

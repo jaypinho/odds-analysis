@@ -5,7 +5,7 @@ import requests
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta, timezone
 import time
-from src.utils.teams import teams_match_fuzzy, normalize_team_name_for_matching
+from src.models.team import teams_match_fuzzy, normalize_team_name_for_matching
 
 
 class TheOddsAPICollector:

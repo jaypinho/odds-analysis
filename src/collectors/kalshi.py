@@ -11,7 +11,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
-from src.utils.teams import find_teams_in_text, get_team_keywords
+from src.models.team import find_teams_in_text
 
 
 class KalshiCollector:
@@ -305,7 +305,9 @@ class KalshiCollector:
         
         # Look for patterns indicating which team the market is about
         for i, team in enumerate(teams):
-            team_keywords = get_team_keywords(team)
+            from src.models.team import Team
+            team_obj = Team.find_team_by_name(team, 'mlb')
+            team_keywords = team_obj.keywords if team_obj else [team.lower()]
             for keyword in team_keywords:
                 if f"{keyword} win" in market_text or f"will {keyword}" in market_text:
                     # This market is asking about this specific team winning

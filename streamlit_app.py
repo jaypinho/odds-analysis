@@ -17,6 +17,7 @@ st.set_page_config(
     layout="wide"
 )
 
+@st.cache_data(ttl=60)  # Cache for 60 seconds
 def load_games():
     """Load all games from the database"""
     query = """
@@ -26,18 +27,22 @@ def load_games():
         g.league,
         g.home_team,
         g.away_team,
-        g.game_date,
+        g.game_date_local,
         g.game_start_time,
         g.actual_outcome,
-        g.game_status
+        g.game_status,
+        m.identifier as polymarket_slug
     FROM games g
+    LEFT JOIN markets m ON g.id = m.game_id 
+    LEFT JOIN platforms p ON m.platform_id = p.id 
+    WHERE p.name = 'polymarket' OR p.name IS NULL
     ORDER BY g.game_start_time DESC
     """
     
     try:
         results = db_manager.execute_query(query)
         if results:
-            columns = ['id', 'sport', 'league', 'home_team', 'away_team', 'game_date', 'game_start_time', 'actual_outcome', 'game_status']
+            columns = ['id', 'sport', 'league', 'home_team', 'away_team', 'game_date_local', 'game_start_time', 'actual_outcome', 'game_status', 'polymarket_slug']
             return pd.DataFrame(results, columns=columns)
         else:
             return pd.DataFrame()
@@ -95,6 +100,7 @@ def calculate_brier_scores():
         st.error(f"Error calculating Brier scores: {e}")
         return pd.DataFrame()
 
+@st.cache_data(ttl=60)  # Cache for 60 seconds
 def load_odds_for_game(game_id):
     """Load all odds data for a specific game"""
     query = """
@@ -300,22 +306,78 @@ def show_game_analysis():
     # Game selection
     st.subheader("Select a Game")
     
-    # Create a more readable game display
-    games_df['display_name'] = (
-        games_df['away_team'] + ' @ ' + games_df['home_team'] + 
-        ' (' + games_df['game_date'].astype(str) + ')'
+    # Convert game_date to datetime for date filtering
+    games_df['game_date_local'] = pd.to_datetime(games_df['game_date_local'])
+    
+    # Date picker for filtering games
+    col1, col2 = st.columns([1, 2])
+    
+    with col1:
+        # Get available date range
+        min_date = games_df['game_date_local'].min().date()
+        max_date = games_df['game_date_local'].max().date()
+        
+        # Default to today's date if there are games today, otherwise most recent date
+        from datetime import date
+        today = date.today()
+        available_dates = set(games_df['game_date_local'].dt.date)
+        
+        if today in available_dates:
+            default_date = today
+        else:
+            default_date = max_date
+        
+        selected_date = st.date_input(
+            "Select a date:",
+            value=default_date,
+            min_value=min_date,
+            max_value=max_date,
+            key="date_selector"
+        )
+    
+    # Filter games by selected date
+    games_on_date = games_df[games_df['game_date_local'].dt.date == selected_date].copy()
+    
+    if games_on_date.empty:
+        st.warning(f"No games found for {selected_date}")
+        return
+    
+    # Sort games by start time in ascending order
+    games_on_date = games_on_date.sort_values('game_start_time')
+    
+    # Create display names for games on selected date
+    games_on_date['display_name'] = (
+        games_on_date['away_team'] + ' @ ' + games_on_date['home_team'] + 
+        ' (' + games_on_date['game_start_time'].dt.strftime('%H:%M') + ')'
     )
     
-    # Game selection dropdown
-    selected_game_display = st.selectbox(
-        "Choose a game:",
-        options=games_df['display_name'].tolist(),
-        index=0
-    )
+    with col2:
+        # Game selection dropdown for the selected date
+        selected_game_display = st.selectbox(
+            f"Choose a game from {selected_date}:",
+            options=games_on_date['display_name'].tolist(),
+            index=0,
+            key=f"game_selector_{selected_date}"
+        )
     
     # Get the selected game ID
-    selected_game = games_df[games_df['display_name'] == selected_game_display].iloc[0]
+    selected_game = games_on_date[games_on_date['display_name'] == selected_game_display].iloc[0]
     game_id = selected_game['id']
+    
+    # Add Polymarket link if slug is available
+    if pd.notna(selected_game['polymarket_slug']) and selected_game['polymarket_slug']:
+        st.markdown(f"🔗 [View on Polymarket](https://polymarket.com/event/{selected_game['polymarket_slug']})")
+    
+    # Store the current game ID in session state to track changes
+    if 'current_game_id' not in st.session_state:
+        st.session_state.current_game_id = game_id
+    elif st.session_state.current_game_id != game_id:
+        st.session_state.current_game_id = game_id
+        # Clear any cached multiselect state when game changes
+        if hasattr(st.session_state, 'outcomes_selector_keys'):
+            for key in st.session_state.outcomes_selector_keys:
+                if key in st.session_state:
+                    del st.session_state[key]
     
     # Display game info
     col1, col2, col3 = st.columns(3)
@@ -413,14 +475,16 @@ def show_game_analysis():
                 chart_outcomes = st.multiselect(
                     "Select outcomes to display",
                     options=sorted(odds_df['outcome_type'].unique()),
-                    default=sorted(odds_df['outcome_type'].unique())
+                    default=sorted(odds_df['outcome_type'].unique()),
+                    key=f"outcomes_selector_{st.session_state.current_game_id}"
                 )
             
             with col2:
                 odds_type = st.selectbox(
                     "Odds type",
                     options=['decimal_odds', 'devigged_decimal_odds'],
-                    format_func=lambda x: "Raw Decimal Odds" if x == 'decimal_odds' else "De-vigged Decimal Odds"
+                    format_func=lambda x: "Raw Decimal Odds" if x == 'decimal_odds' else "De-vigged Decimal Odds",
+                    index=1  # Default to 'De-vigged Decimal Odds'
                 )
             
             if chart_outcomes:
@@ -430,13 +494,13 @@ def show_game_analysis():
                 # Ensure timestamp is properly formatted
                 chart_data['timestamp'] = pd.to_datetime(chart_data['timestamp'])
                 
-                # Create the scatter plot
-                fig = px.scatter(
+                # Create the line chart
+                fig = px.line(
                     chart_data,
                     x='timestamp',
                     y=odds_type,
                     color='outcome_type',
-                    symbol='platform_name',
+                    line_dash='platform_name',
                     hover_data=['platform_name', 'raw_probability', 'devigged_probability'],
                     title=f"{'Raw' if odds_type == 'decimal_odds' else 'De-vigged'} Decimal Odds Over Time",
                     labels={
@@ -446,11 +510,17 @@ def show_game_analysis():
                     }
                 )
                 
+                # Add markers to the lines
+                fig.update_traces(mode='lines+markers')
+                
                 # Add game start time line if we have the data
                 try:
                     game_start_time = pd.to_datetime(selected_game['game_start_time'])
-                    # Convert to datetime object that Plotly can handle
-                    game_start_dt = game_start_time.to_pydatetime()
+                    # Convert to datetime object that Plotly can handle using .item() instead of deprecated .to_pydatetime()
+                    if hasattr(game_start_time, 'item'):
+                        game_start_dt = game_start_time.item()
+                    else:
+                        game_start_dt = game_start_time
                     fig.add_vline(
                         x=game_start_dt,
                         line_dash="dash",
