@@ -45,6 +45,56 @@ def load_games():
         st.error(f"Error loading games: {e}")
         return pd.DataFrame()
 
+def calculate_brier_scores():
+    """Calculate Brier scores for each platform using completed games."""
+    query = """
+    SELECT 
+        p.name as platform_name,
+        p.platform_type,
+        p.region,
+        COUNT(DISTINCT g.id) as num_games,
+        COUNT(os.id) as num_predictions,
+        AVG(POWER(os.devigged_probability - 
+            CASE 
+                WHEN g.actual_outcome = o.outcome_type THEN 1.0 
+                ELSE 0.0 
+            END, 2)) as brier_score,
+        AVG(os.devigged_probability) as avg_predicted_probability,
+        COUNT(CASE WHEN g.actual_outcome = o.outcome_type THEN 1 END) as correct_predictions,
+        COUNT(CASE WHEN g.actual_outcome = o.outcome_type THEN 1 END) * 1.0 / COUNT(os.id) as accuracy
+    FROM odds_snapshots os
+    JOIN outcomes o ON os.outcome_id = o.id
+    JOIN markets m ON o.market_id = m.id
+    JOIN platforms p ON m.platform_id = p.id
+    JOIN games g ON m.game_id = g.id
+    WHERE g.actual_outcome IS NOT NULL 
+    AND g.game_status = 'completed'
+    AND os.devigged_probability IS NOT NULL
+    GROUP BY p.name, p.platform_type, p.region
+    HAVING COUNT(os.id) >= 10  -- Minimum 10 predictions for meaningful Brier score
+    ORDER BY brier_score ASC
+    """
+    
+    try:
+        results = db_manager.execute_query(query)
+        if results:
+            columns = ['platform_name', 'platform_type', 'region', 'num_games', 'num_predictions', 
+                      'brier_score', 'avg_predicted_probability', 'correct_predictions', 'accuracy']
+            df = pd.DataFrame(results, columns=columns)
+            
+            # Convert decimal columns to float
+            numeric_columns = ['brier_score', 'avg_predicted_probability', 'accuracy']
+            for col in numeric_columns:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+            
+            return df
+        else:
+            return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Error calculating Brier scores: {e}")
+        return pd.DataFrame()
+
 def load_odds_for_game(game_id):
     """Load all odds data for a specific game"""
     query = """
@@ -98,6 +148,148 @@ def main():
     st.title("📊 Sports Odds Analysis Dashboard")
     st.markdown("---")
     
+    # Main navigation
+    page = st.selectbox(
+        "Select a page:",
+        ["Game Analysis", "Brier Scores"]
+    )
+    
+    if page == "Game Analysis":
+        show_game_analysis()
+    elif page == "Brier Scores":
+        show_brier_scores()
+
+def show_brier_scores():
+    """Display Brier scores page."""
+    st.header("🎯 Brier Scores by Platform")
+    st.markdown("""
+    Brier scores measure the accuracy of probabilistic predictions. 
+    Lower scores are better (perfect score = 0, worst score = 1).
+    """)
+    
+    # Calculate Brier scores
+    brier_df = calculate_brier_scores()
+    
+    if brier_df.empty:
+        st.warning("No completed games found for Brier score calculation.")
+        return
+    
+    # Display summary metrics
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Total Platforms", len(brier_df))
+    with col2:
+        best_platform = brier_df.loc[brier_df['brier_score'].idxmin()]
+        st.metric("Best Brier Score", f"{best_platform['brier_score']:.4f}", 
+                 help=f"Platform: {best_platform['platform_name']}")
+    with col3:
+        total_predictions = brier_df['num_predictions'].sum()
+        st.metric("Total Predictions", f"{total_predictions:,}")
+    
+    # Filters
+    col1, col2 = st.columns(2)
+    with col1:
+        platform_types = ['All'] + sorted(brier_df['platform_type'].unique().tolist())
+        selected_type = st.selectbox("Platform Type", platform_types)
+    
+    with col2:
+        min_predictions = st.slider("Minimum Predictions", 
+                                   min_value=10, 
+                                   max_value=int(brier_df['num_predictions'].max()), 
+                                   value=50)
+    
+    # Filter data
+    filtered_df = brier_df.copy()
+    if selected_type != 'All':
+        filtered_df = filtered_df[filtered_df['platform_type'] == selected_type]
+    
+    filtered_df = filtered_df[filtered_df['num_predictions'] >= min_predictions]
+    
+    if filtered_df.empty:
+        st.warning("No platforms match the selected filters.")
+        return
+    
+    # Create the main table
+    st.subheader("Platform Performance Summary")
+    
+    display_df = filtered_df.copy()
+    display_df['region'] = display_df['region'].fillna('Global')
+    
+    # Format columns for display
+    display_df['brier_score'] = display_df['brier_score'].round(4)
+    display_df['avg_predicted_probability'] = display_df['avg_predicted_probability'].round(3)
+    display_df['accuracy'] = display_df['accuracy'].round(3)
+    
+    st.dataframe(
+        display_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "platform_name": "Platform",
+            "platform_type": "Type",
+            "region": "Region",
+            "num_games": st.column_config.NumberColumn("Games", format="%d"),
+            "num_predictions": st.column_config.NumberColumn("Predictions", format="%d"),
+            "brier_score": st.column_config.NumberColumn("Brier Score", format="%.4f"),
+            "avg_predicted_probability": st.column_config.NumberColumn("Avg Probability", format="%.3f"),
+            "correct_predictions": st.column_config.NumberColumn("Correct", format="%d"),
+            "accuracy": st.column_config.NumberColumn("Accuracy", format="%.1%")
+        }
+    )
+    
+    # Performance chart
+    st.subheader("Brier Score Comparison")
+    
+    if len(filtered_df) > 1:
+        # Create bar chart
+        chart_df = filtered_df.copy()
+        chart_df['platform_label'] = chart_df['platform_name'] + \
+            chart_df['region'].apply(lambda x: f" ({x})" if pd.notna(x) and x != 'Global' else "")
+        
+        fig = px.bar(
+            chart_df,
+            x='platform_label',
+            y='brier_score',
+            color='platform_type',
+            title="Brier Scores by Platform (Lower is Better)",
+            labels={
+                'platform_label': 'Platform',
+                'brier_score': 'Brier Score',
+                'platform_type': 'Platform Type'
+            },
+            hover_data=['num_games', 'num_predictions', 'accuracy']
+        )
+        
+        fig.update_layout(
+            height=500,
+            xaxis_title="Platform",
+            yaxis_title="Brier Score",
+            xaxis_tickangle=-45
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+    
+    # Additional insights
+    st.subheader("Key Insights")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("**Best Performers:**")
+        top_3 = filtered_df.nsmallest(3, 'brier_score')
+        for i, row in top_3.iterrows():
+            region_text = f" ({row['region']})" if pd.notna(row['region']) and row['region'] != 'Global' else ""
+            st.write(f"{row.name + 1}. {row['platform_name']}{region_text}: {row['brier_score']:.4f}")
+    
+    with col2:
+        st.markdown("**Most Active:**")
+        most_active = filtered_df.nlargest(3, 'num_predictions')
+        for i, row in most_active.iterrows():
+            region_text = f" ({row['region']})" if pd.notna(row['region']) and row['region'] != 'Global' else ""
+            st.write(f"{row.name + 1}. {row['platform_name']}{region_text}: {row['num_predictions']:,} predictions")
+
+def show_game_analysis():
+    """Display the original game analysis page."""
     # Load games
     games_df = load_games()
     
