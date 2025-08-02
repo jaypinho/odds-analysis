@@ -1,6 +1,7 @@
 """Data collector for Polymarket using Gamma API."""
 
 import requests
+import json
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 import time
@@ -233,19 +234,31 @@ class PolymarketCollector:
             # For binary markets, token_index 0 is "Yes", token_index 1 is "No"
             is_yes_outcome = token_index == 0
             
+            # Get the actual outcome name from the outcomes field
+            outcome_name_from_market = None
+            try:
+                outcomes_str = market_data.get('outcomes')
+                if outcomes_str:
+                    outcomes = json.loads(outcomes_str)
+                    if outcomes and token_index < len(outcomes):
+                        outcome_name_from_market = outcomes[token_index]
+            except (json.JSONDecodeError, IndexError, TypeError):
+                pass
+            
             if is_yes_outcome:
                 # Yes outcome - use the price as-is
                 decimal_odds = 1 / price if price > 0 else 0
-                print(f"DEBUG: Determining outcome type for teams: {teams}")
-                outcome_type = self._determine_outcome_type_from_market(event_data, market_data, teams)
-                outcome_name = f"Yes - {market_data.get('question', market_data.get('description', ''))}"
+                outcome_type = self._determine_outcome_type_from_market(market_data, teams, token_index)
+                outcome_name = outcome_name_from_market or f"Yes - {market_data.get('question', market_data.get('description', ''))}"
                 probability = price
             else:
                 # No outcome - calculate implied probability of the opposite
                 no_probability = 1 - price
                 decimal_odds = 1 / no_probability if no_probability > 0 else 0
-                outcome_type = self._get_opposite_outcome_type(self._determine_outcome_type_from_market(event_data, market_data, teams))
-                outcome_name = f"No - {market_data.get('question', market_data.get('description', ''))}"
+                # For No outcome, get the opposite of the Yes outcome (token_index 0)
+                yes_outcome_type = self._determine_outcome_type_from_market(market_data, teams, 0)
+                outcome_type = self._get_opposite_outcome_type(yes_outcome_type)
+                outcome_name = f"No - {outcome_name_from_market or market_data.get('question', market_data.get('description', ''))}"
                 probability = no_probability
             
             normalized_odds.append({
@@ -262,64 +275,39 @@ class PolymarketCollector:
         
         return normalized_odds
     
-    def _determine_outcome_type_from_market(self, event_data: Dict[str, Any], market_data: Dict[str, Any], teams: List[str]) -> str:
-        """Determine which team this market is betting on based on event and market text."""
-        # Combine event and market text
-        event_question = event_data.get('question', '').lower()
-        event_title = event_data.get('title', '').lower()
-        market_question = market_data.get('question', '').lower()
-        market_description = market_data.get('description', '').lower()
+    def _determine_outcome_type_from_market(self, market_data: Dict[str, Any], teams: List[str], token_index: int) -> str:
+        """Determine outcome type using the market's outcomes field and token index."""
         
-        combined_text = f"{event_question} {event_title} {market_question} {market_description}"
-        
-        if len(teams) != 2:
-            print(f"DEBUG: Cannot determine outcome type - found {len(teams)} teams: {teams}")
-            print(f"DEBUG: Combined text: {combined_text[:200]}...")
+        # Get the outcomes from the market data
+        outcomes_str = market_data.get('outcomes')
+        if not outcomes_str:
             return 'unknown'
         
-        # Look for patterns indicating which team the market is about
-        for i, team in enumerate(teams):
-            team_keywords = get_team_keywords(team)
-            for keyword in team_keywords:
-                if f"will {keyword}" in combined_text or f"{keyword} win" in combined_text or f"{keyword} beat" in combined_text:
-                    return 'home_win' if i == 0 else 'away_win'
-        
-        # Default fallback - check which team is mentioned more
-        team1_mentions = sum(1 for keyword in get_team_keywords(teams[0]) if keyword in combined_text)
-        team2_mentions = sum(1 for keyword in get_team_keywords(teams[1]) if keyword in combined_text)
-        
-        return 'home_win' if team1_mentions >= team2_mentions else 'away_win'
+        try:
+            outcomes = json.loads(outcomes_str)
+            if not outcomes or token_index >= len(outcomes):
+                return 'unknown'
+            
+            # Get the outcome name for this token index
+            outcome_name = outcomes[token_index]
+            
+            # Match outcome name to teams to determine home/away
+            if len(teams) == 2:
+                # Check if outcome name matches home team (teams[0]) or away team (teams[1])
+                home_team, away_team = teams[0], teams[1]
+                
+                # Simple string matching - check if team name is in outcome
+                if any(keyword.lower() in outcome_name.lower() for keyword in get_team_keywords(home_team)):
+                    return 'home_win'
+                elif any(keyword.lower() in outcome_name.lower() for keyword in get_team_keywords(away_team)):
+                    return 'away_win'
+            
+            return 'unknown'
+            
+        except (json.JSONDecodeError, IndexError, TypeError) as e:
+            print(f"Error parsing outcomes for market: {e}")
+            return 'unknown'
     
-    def _determine_outcome_type(self, event_data: Dict[str, Any], teams: List[str]) -> str:
-        """Determine which team this event is betting on based on the question."""
-        question = event_data.get('question', '').lower()
-        title = event_data.get('title', '').lower()
-        slug = event_data.get('slug', '').lower()
-        
-        # Combine text to search
-        event_text = f"{question} {title} {slug}"
-        
-        if len(teams) != 2:
-            return 'unknown'
-        
-        # Check which team is mentioned first or more prominently in the question
-        team1_mentions = sum(1 for keyword in get_team_keywords(teams[0]) 
-                           if keyword in event_text)
-        team2_mentions = sum(1 for keyword in get_team_keywords(teams[1]) 
-                           if keyword in event_text)
-        
-        # Look for patterns like "Will [Team] win" or "Will [Team] beat"
-        for team in teams:
-            team_keywords = get_team_keywords(team)
-            for keyword in team_keywords:
-                if f"will {keyword}" in event_text or f"{keyword} win" in event_text:
-                    # This event is asking about this specific team winning
-                    # We need to determine if it's home or away, but for now just pick one
-                    # In practice, you'd need to cross-reference with the actual game data
-                    return 'home_win' if team == teams[0] else 'away_win'
-        
-        # Default fallback
-        return 'home_win' if team1_mentions >= team2_mentions else 'away_win'
     
     def _get_opposite_outcome_type(self, outcome_type: str) -> str:
         """Get the opposite outcome type."""
