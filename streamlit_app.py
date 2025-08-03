@@ -64,9 +64,7 @@ def calculate_brier_scores():
                 WHEN g.actual_outcome = o.outcome_type THEN 1.0 
                 ELSE 0.0 
             END, 2)) as brier_score,
-        AVG(os.devigged_probability) as avg_predicted_probability,
-        COUNT(CASE WHEN g.actual_outcome = o.outcome_type THEN 1 END) as correct_predictions,
-        COUNT(CASE WHEN g.actual_outcome = o.outcome_type THEN 1 END) * 1.0 / COUNT(os.id) as accuracy
+        AVG(os.devigged_probability) as avg_predicted_probability
     FROM odds_snapshots os
     JOIN outcomes o ON os.outcome_id = o.id
     JOIN markets m ON o.market_id = m.id
@@ -75,8 +73,9 @@ def calculate_brier_scores():
     WHERE g.actual_outcome IS NOT NULL 
     AND g.game_status = 'completed'
     AND os.devigged_probability IS NOT NULL
+    AND os.is_closing_line = TRUE  -- Only use closing lines
     GROUP BY p.name, p.platform_type, p.region
-    HAVING COUNT(os.id) >= 10  -- Minimum 10 predictions for meaningful Brier score
+    HAVING COUNT(os.id) >= 5  -- Reduced minimum since we're only using closing lines now
     ORDER BY brier_score ASC
     """
     
@@ -84,11 +83,11 @@ def calculate_brier_scores():
         results = db_manager.execute_query(query)
         if results:
             columns = ['platform_name', 'platform_type', 'region', 'num_games', 'num_predictions', 
-                      'brier_score', 'avg_predicted_probability', 'correct_predictions', 'accuracy']
+                      'brier_score', 'avg_predicted_probability']
             df = pd.DataFrame(results, columns=columns)
             
             # Convert decimal columns to float
-            numeric_columns = ['brier_score', 'avg_predicted_probability', 'accuracy']
+            numeric_columns = ['brier_score', 'avg_predicted_probability']
             for col in numeric_columns:
                 if col in df.columns:
                     df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -224,7 +223,6 @@ def show_brier_scores():
     # Format columns for display
     display_df['brier_score'] = display_df['brier_score'].round(4)
     display_df['avg_predicted_probability'] = display_df['avg_predicted_probability'].round(3)
-    display_df['accuracy'] = display_df['accuracy'].round(3)
     
     st.dataframe(
         display_df,
@@ -237,9 +235,7 @@ def show_brier_scores():
             "num_games": st.column_config.NumberColumn("Games", format="%d"),
             "num_predictions": st.column_config.NumberColumn("Predictions", format="%d"),
             "brier_score": st.column_config.NumberColumn("Brier Score", format="%.4f"),
-            "avg_predicted_probability": st.column_config.NumberColumn("Avg Probability", format="%.3f"),
-            "correct_predictions": st.column_config.NumberColumn("Correct", format="%d"),
-            "accuracy": st.column_config.NumberColumn("Accuracy", format="%.1%")
+            "avg_predicted_probability": st.column_config.NumberColumn("Avg Probability", format="%.3f")
         }
     )
     
@@ -263,7 +259,7 @@ def show_brier_scores():
                 'brier_score': 'Brier Score',
                 'platform_type': 'Platform Type'
             },
-            hover_data=['num_games', 'num_predictions', 'accuracy']
+            hover_data=['num_games', 'num_predictions', 'avg_predicted_probability']
         )
         
         fig.update_layout(

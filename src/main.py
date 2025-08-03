@@ -30,7 +30,11 @@ class OddsAnalysisOrchestrator:
         print(f"Starting data collection at {datetime.now()}")
         
         try:
-            # First, collect from Polymarket to create game entities as specified in CLAUDE.md
+            # First, update completed games before collecting odds
+            # This prevents storing odds for games that are already finished
+            self._update_completed_games()
+            
+            # Then, collect from Polymarket to create game entities as specified in CLAUDE.md
             self._collect_polymarket_data()
             
             # Then collect from Kalshi (links to existing games)
@@ -38,9 +42,6 @@ class OddsAnalysisOrchestrator:
             
             # Finally collect from The Odds API (sportsbooks) (links to existing games)
             self._collect_sportsbook_data()
-            
-            # Update completed games
-            self._update_completed_games()
             
             print(f"Data collection completed at {datetime.now()}")
             
@@ -373,11 +374,16 @@ class OddsAnalysisOrchestrator:
         if not odds_data or not game_id:
             return
         
-        # Verify game exists before storing odds
-        verify_query = "SELECT id FROM games WHERE id = %s"
+        # Verify game exists and check if it's completed
+        verify_query = "SELECT id, game_status FROM games WHERE id = %s"
         result = db_manager.execute_query(verify_query, (game_id,))
         if not result:
             print(f"Warning: Game ID {game_id} not found in database, skipping odds storage")
+            return
+        
+        game_status = result[0][1]
+        if game_status == 'completed':
+            print(f"Warning: Game ID {game_id} is already completed, skipping odds storage")
             return
         
         # Group odds by platform and apply de-vigging
@@ -406,6 +412,12 @@ class OddsAnalysisOrchestrator:
     def _insert_odds_snapshot(self, game_id: int, odds_data: Dict[str, Any]):
         """Insert single odds snapshot into database with duplicate prevention."""
         try:
+            # Double-check that the game is not completed before inserting odds
+            game_status_query = "SELECT game_status FROM games WHERE id = %s"
+            game_status_result = db_manager.execute_query(game_status_query, (game_id,))
+            if game_status_result and game_status_result[0][0] == 'completed':
+                print(f"Skipping odds insertion for completed game {game_id}")
+                return
             
             # Determine platform type based on platform key
             platform_type = 'prediction_market' if odds_data['platform_key'] in ['polymarket', 'kalshi'] else 'sportsbook'

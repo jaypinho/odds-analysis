@@ -167,13 +167,15 @@ class KalshiCollector:
         found_teams = find_teams_in_text(market_text)
         
         if len(found_teams) >= 2:
-            # Calculate game start time from close_time minus exactly 2 years as specified
+            # Calculate game start time from close_time 
+            # Note: The original CLAUDE.md instruction to subtract 2 years appears to be incorrect
+            # Based on testing, close_time is typically ~2 weeks after the actual game date
             close_time_str = market_data.get('close_time')
             if close_time_str:
                 try:
                     close_time = datetime.fromisoformat(close_time_str.replace('Z', '+00:00'))
-                    # Subtract exactly 2 years as specified in CLAUDE.md
-                    game_start_time = close_time - timedelta(days=2*365)
+                    # Use close_time minus approximately 2 weeks to get game start time
+                    game_start_time = close_time - timedelta(weeks=2)
                     
                     return {
                         'teams': found_teams[:2],

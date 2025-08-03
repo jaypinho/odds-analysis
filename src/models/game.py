@@ -182,7 +182,7 @@ class Game:
     def _mark_closing_lines(self):
         """Mark the final odds snapshot before game start as closing lines."""
         # For each outcome in each market for this game, find the latest odds before game start
-        # that was collected within 30 minutes of game start, and mark it as the closing line
+        # that was collected within 1 hour of game start, and mark it as the closing line
         query = """
             WITH latest_odds AS (
                 SELECT 
@@ -193,7 +193,7 @@ class Game:
                 JOIN markets m ON o.market_id = m.id
                 WHERE m.game_id = %s 
                 AND os.timestamp <= %s
-                AND os.timestamp >= %s - INTERVAL '30 minutes'
+                AND os.timestamp >= %s - INTERVAL '60 minutes'
                 GROUP BY os.outcome_id
             )
             UPDATE odds_snapshots 
