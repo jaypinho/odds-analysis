@@ -279,12 +279,22 @@ class KalshiCollector:
             # Determine which team/outcome this is for
             outcome_type = self._determine_outcome_type(market_data, teams)
             
+            # Get the appropriate team name for the outcome_name
+            outcome_name = "Unknown Team"
+            if outcome_type == 'home_win' and len(teams) >= 1:
+                outcome_name = teams[0]
+            elif outcome_type == 'away_win' and len(teams) >= 2:
+                outcome_name = teams[1]
+            elif len(teams) >= 1:
+                # Fallback to first team if outcome_type is unclear
+                outcome_name = teams[0]
+            
             normalized_odds.append({
                 'platform_name': 'Kalshi',
                 'platform_key': 'kalshi',
                 'market_type': 'prediction',
                 'identifier': market_data.get('event_ticker'),  # Use event_ticker as identifier
-                'outcome_name': f"Yes - {market_data.get('title', '')}",
+                'outcome_name': outcome_name,
                 'outcome_type': outcome_type,
                 'decimal_odds': decimal_odds,
                 'probability': probability,
@@ -296,24 +306,34 @@ class KalshiCollector:
     
     def _determine_outcome_type(self, market_data: Dict[str, Any], teams: List[str]) -> str:
         """Determine which team this market is betting on."""
-        title = market_data.get('title', '').lower()
-        subtitle = market_data.get('subtitle', '').lower()
-        
-        # Combine text to search
-        market_text = f"{title} {subtitle}"
-        
         if len(teams) != 2:
             return 'unknown'
         
-        # Look for patterns indicating which team the market is about
-        for i, team in enumerate(teams):
-            from src.models.team import Team
-            team_obj = Team.find_team_by_name(team, 'mlb')
-            team_keywords = team_obj.keywords if team_obj else [team.lower()]
-            for keyword in team_keywords:
-                if f"{keyword} win" in market_text or f"will {keyword}" in market_text:
-                    # This market is asking about this specific team winning
-                    return 'home_win' if i == 0 else 'away_win'
+        # Method 1: Use ticker - extract team abbreviation from last part after '-'
+        ticker = market_data.get('ticker', '')
+        if ticker and '-' in ticker:
+            team_abbrev = ticker.split('-')[-1].upper()
+            
+            # Match against team abbreviations/keywords
+            for i, team in enumerate(teams):
+                from src.models.team import Team
+                team_obj = Team.find_team_by_name(team, 'mlb')
+                if team_obj:
+                    # Check if the ticker abbreviation matches any of the team's keywords
+                    team_keywords = [kw.upper() for kw in team_obj.keywords]
+                    if team_abbrev in team_keywords:
+                        return 'home_win' if i == 0 else 'away_win'
         
-        # Default fallback - assume first team mentioned
+        # Method 2: Use yes_sub_title if ticker method didn't work
+        yes_sub_title = market_data.get('yes_sub_title', '').lower()
+        if yes_sub_title:
+            for i, team in enumerate(teams):
+                from src.models.team import Team
+                team_obj = Team.find_team_by_name(team, 'mlb')
+                team_keywords = team_obj.keywords if team_obj else [team.lower()]
+                for keyword in team_keywords:
+                    if keyword.lower() in yes_sub_title:
+                        return 'home_win' if i == 0 else 'away_win'
+        
+        # Fallback - assume first team mentioned is home team
         return 'home_win'
